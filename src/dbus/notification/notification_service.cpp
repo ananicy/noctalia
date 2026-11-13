@@ -46,7 +46,7 @@ namespace {
     return sdbus::createProxy(connection, kDbusBusName, kDbusObjectPath);
   }
 
-  [[nodiscard]] uint32_t notificationNameRequestFlags() {
+  uint32_t notificationNameRequestFlags() {
     if (compositors::isKde()) {
       return kNameFlagAllowReplacement | kNameFlagReplaceExisting | kNameFlagDoNotQueue;
     }
@@ -115,17 +115,17 @@ NotificationService::NotificationService(SessionBus& bus, NotificationManager& m
                   return onNotify(app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout);
                 }),
 
-            sdbus::registerMethod("GetCapabilities").withOutputParamNames("capabilities").implementedAs([this]() {
+            sdbus::registerMethod("GetCapabilities").withOutputParamNames("capabilities").implementedAs([this] {
               return onGetCapabilities();
             }),
 
             sdbus::registerMethod("GetNotifications")
                 .withOutputParamNames("active_notifications")
-                .implementedAs([this]() { return onGetNotifications(); }),
+                .implementedAs([this] { return onGetNotifications(); }),
 
             sdbus::registerMethod("GetServerInformation")
                 .withOutputParamNames("name", "vendor", "version", "spec_version")
-                .implementedAs([this]() { return onGetServerInformation(); }),
+                .implementedAs([this] { return onGetServerInformation(); }),
 
             sdbus::registerMethod("CloseNotification").withInputParamNames("id").implementedAs([this](uint32_t id) {
               onCloseNotification(id);
@@ -281,6 +281,16 @@ namespace notification_dbus {
     return icon;
   }
 
+  bool notifyIconIsAppIcon(const std::string& appIcon, const std::map<std::string, sdbus::Variant>& hints) {
+    return !appIcon.empty()
+        && !uri::isRemoteUrl(appIcon)
+        && !hints.contains("image-path")
+        && !hints.contains("image_path")
+        && !hints.contains("image-data")
+        && !hints.contains("image_data")
+        && !hints.contains("icon_data");
+  }
+
   std::optional<std::string> notifyCategoryFromHints(const std::map<std::string, sdbus::Variant>& hints) {
     if (auto it = hints.find("category"); it != hints.end()) {
       try {
@@ -343,7 +353,7 @@ namespace notification_dbus {
       // Many screenshot tools (e.g. HyprCap) provide a single temp file via "image-path" which gets
       // overwritten on every new capture. Snapshot it into `imageData` so history thumbnails stay
       // immutable.
-      const std::string normalizedPath = uri::normalizeFileUrl(std::string(imagePath));
+      const std::string normalizedPath = uri::normalizeFileUrl(imagePath);
       if (normalizedPath.empty() || normalizedPath.front() != '/') {
         return std::nullopt;
       }
@@ -435,6 +445,7 @@ namespace notification_dbus {
             .transient = notifyTransientFromHints(hints),
             .actions = sanitizedActions,
             .icon = notifyIcon(app_name, app_icon, hints),
+            .iconIsAppIcon = notifyIconIsAppIcon(app_icon, hints),
             .imageData = notifyImageDataFromHints(hints),
             .category = notifyCategoryFromHints(hints),
             .desktopEntry = notifyDesktopEntryFromHints(hints),

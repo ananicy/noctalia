@@ -99,60 +99,61 @@ namespace calendar {
       EventCallback callback;
     };
 
-    State() : worker([this](std::stop_token stopToken) { workerLoop(stopToken); }) {}
+    State() : m_worker([this](const std::stop_token& stopToken) { workerLoop(stopToken); }) {}
 
     ~State() { stop(); }
 
     bool enqueue(ParseRequest request) {
       {
-        std::scoped_lock lock(mutex);
-        if (stopping) {
+        std::scoped_lock lock(m_mutex);
+        if (m_stopping) {
           return false;
         }
-        requests.push_back(std::move(request));
+        m_requests.push_back(std::move(request));
       }
-      cv.notify_one();
+      m_cv.notify_one();
       return true;
     }
 
-    void deliver(EventCallback callback, bool ok, std::vector<CalendarEvent> events) {
+    void deliver(EventCallback callback, SyncFailure failure, std::vector<CalendarEvent> events) {
       const std::weak_ptr<State> weak = weak_from_this();
-      DeferredCall::callLater([weak, callback = std::move(callback), ok, events = std::move(events)]() mutable {
+      DeferredCall::callLater([weak, callback = std::move(callback), failure, events = std::move(events)] mutable {
         const auto state = weak.lock();
         if (!state || !state->accepting()) {
           return;
         }
-        callback(ok, std::move(events));
+        callback(failure, std::move(events));
       });
     }
 
     void stop() {
-      worker.request_stop();
+      m_worker.request_stop();
       {
-        std::scoped_lock lock(mutex);
-        stopping = true;
-        requests.clear();
+        std::scoped_lock lock(m_mutex);
+        m_stopping = true;
+        m_requests.clear();
       }
-      cv.notify_one();
-      if (worker.joinable()) {
-        worker.join();
+      m_cv.notify_one();
+      if (m_worker.joinable()) {
+        m_worker.join();
       }
     }
 
   private:
     bool accepting() const {
-      std::scoped_lock lock(mutex);
-      return !stopping;
+      std::scoped_lock lock(m_mutex);
+      return !m_stopping;
     }
 
-    static std::pair<bool, std::vector<CalendarEvent>> parse(const ParseRequest& request, std::stop_token stopToken) {
+    static std::pair<SyncFailure, std::vector<CalendarEvent>>
+    parse(const ParseRequest& request, std::stop_token stopToken) {
       xmlDocPtr doc = xmlReadMemory(
           request.body.data(), static_cast<int>(request.body.size()), "caldav.xml", nullptr,
           XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING | XML_PARSE_RECOVER
       );
       if (doc == nullptr) {
         kLog.warn("caldav response XML parse error");
-        return {false, {}};
+        return {SyncFailure::InvalidResponse, {}};
       }
 
       std::vector<std::string> calendarDataBlocks;
@@ -161,12 +162,15 @@ namespace calendar {
       }
       xmlFreeDoc(doc);
 
-      ICalParseControl control{.stopToken = stopToken};
+      ICalParseControl control{.stopToken = std::move(stopToken)};
 
       std::vector<CalendarEvent> events;
       std::size_t skipped = 0;
       for (const std::string& ics : calendarDataBlocks) {
         ICalParseResult result = parseICalEvents(ics, request.start, request.end, control);
+        if (result.status == ICalParseStatus::Cancelled) {
+          return {SyncFailure::Cancelled, {}};
+        }
         if (result.status == ICalParseStatus::InvalidCalendar) {
           // One unusable resource must not hide the whole collection: skip it and say why.
           ++skipped;
@@ -186,7 +190,7 @@ namespace calendar {
                 icsProperty(ics, "UID")
             );
           }
-          return {false, {}};
+          return {SyncFailure::InvalidResponse, {}};
         }
         for (CalendarEvent& event : result.events) {
           event.calendarName = request.calendarName;
@@ -203,41 +207,41 @@ namespace calendar {
             "caldav calendar '{}': all {} resource(s) were invalid; reporting the calendar as failed",
             request.calendarName, calendarDataBlocks.size()
         );
-        return {false, {}};
+        return {SyncFailure::InvalidResponse, {}};
       }
       kLog.debug(
           "caldav calendar '{}': {} resource(s), {} event(s), {} skipped", request.calendarName,
           calendarDataBlocks.size(), events.size(), skipped
       );
-      return {true, std::move(events)};
+      return {SyncFailure::None, std::move(events)};
     }
 
-    void workerLoop(std::stop_token stopToken) {
+    void workerLoop(const std::stop_token& stopToken) {
       while (true) {
         ParseRequest request;
         {
-          std::unique_lock lock(mutex);
-          cv.wait(lock, [this]() { return stopping || !requests.empty(); });
-          if (stopping) {
+          std::unique_lock lock(m_mutex);
+          m_cv.wait(lock, [this] { return m_stopping || !m_requests.empty(); });
+          if (m_stopping) {
             return;
           }
-          request = std::move(requests.front());
-          requests.pop_front();
+          request = std::move(m_requests.front());
+          m_requests.pop_front();
         }
 
-        auto [ok, events] = parse(request, stopToken);
+        auto [failure, events] = parse(request, stopToken);
         if (stopToken.stop_requested()) {
           return;
         }
-        deliver(std::move(request.callback), ok, std::move(events));
+        deliver(std::move(request.callback), failure, std::move(events));
       }
     }
 
-    mutable std::mutex mutex;
-    std::condition_variable cv;
-    std::deque<ParseRequest> requests;
-    bool stopping = false;
-    std::jthread worker;
+    mutable std::mutex m_mutex;
+    std::condition_variable m_cv;
+    std::deque<ParseRequest> m_requests;
+    bool m_stopping = false;
+    std::jthread m_worker;
   };
 
   CalDavClient::CalDavClient(HttpClient& http)
@@ -283,7 +287,7 @@ namespace calendar {
       }
       if (!resp.transportOk || (resp.status != 207 && resp.status != 200)) {
         kLog.warn("caldav REPORT for calendar '{}' failed http={}", calendarName, resp.status);
-        state->deliver(std::move(cb), false, {});
+        state->deliver(std::move(cb), syncFailureFromResponse(resp), {});
         return;
       }
       state->enqueue({

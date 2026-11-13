@@ -25,6 +25,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <optional>
 #include <span>
 #include <string>
@@ -48,33 +49,35 @@ namespace noctalia::config {
     // merging continues with what parsed. `originsOut` collects each key's source
     // position in the same precedence order.
     toml::table mergeSources(
-        std::string_view configDir, std::string_view settingsTomlPath, schema::Diagnostics& diag,
-        std::vector<std::filesystem::path>& loadedFilesOut, ConfigOriginIndex& originsOut
+        std::string_view configDir, std::span<const std::string> systemConfigDirs, std::string_view settingsTomlPath,
+        schema::Diagnostics& diag, std::vector<std::filesystem::path>& loadedFilesOut, ConfigOriginIndex& originsOut
     ) {
-      auto mergeResult = mergeConfigWithIncludes(configDir);
+      auto mergeResult = mergeConfigWithIncludes(configDir, systemConfigDirs);
       toml::table merged = std::move(mergeResult.merged);
       loadedFilesOut = std::move(mergeResult.loadedFiles);
       originsOut = std::move(mergeResult.origins);
       if (!mergeResult.firstError.empty()) {
         diag.fatalAt(std::move(mergeResult.firstErrorOrigin), "syntax", mergeResult.firstError, "config.syntax");
       }
+      toml::table sidecar;
       if (!settingsTomlPath.empty() && std::filesystem::exists(settingsTomlPath)) {
         const std::filesystem::path settingsFile{std::string(settingsTomlPath)};
         try {
-          toml::table sidecar = toml::parse_file(std::string(settingsTomlPath));
+          sidecar = toml::parse_file(settingsTomlPath);
           originsOut.record(settingsFile, sidecar);
           if (const auto version = storedConfigVersion(sidecar, diag); version.has_value()) {
-            const int appliedVersion = applyPendingConfigMigrations(sidecar, *version, diag);
+            const int appliedVersion = applyPendingConfigMigrations(sidecar, merged, *version, diag);
             sidecar.insert_or_assign(kConfigVersionKey, static_cast<std::int64_t>(appliedVersion));
           }
           ConfigService::deepMerge(merged, sidecar);
         } catch (const toml::parse_error& e) {
+          sidecar.clear();
           diag.fatalAt(parseErrorOrigin(e, settingsFile), "syntax", std::string(e.description()), "config.syntax");
         }
       }
       merged.erase(kConfigVersionKey);
       LegacyConfigIssues issues;
-      normalizeLegacyConfig(merged, issues);
+      normalizeLegacyConfig(merged, issues, &sidecar);
       for (const LegacyConfigIssue& issue : issues) {
         diag.warn(issue.path, issue.message);
       }
@@ -118,11 +121,11 @@ namespace noctalia::config {
       if (launcherTbl == nullptr) {
         return;
       }
-      if (const auto* prefixVal = (*launcherTbl)["provider_prefix"].as_string()) {
-        if (prefixVal->get().empty()) {
-          diag.warn("shell.launcher.provider_prefix", "is empty, falling back to '/'");
-        }
+      if (const auto* prefixVal = (*launcherTbl)["provider_prefix"].as_string();
+          prefixVal && prefixVal->get().empty()) {
+        diag.warn("shell.launcher.provider_prefix", "is empty, falling back to '/'");
       }
+
       const auto* providersTbl = (*launcherTbl)["providers"].as_table();
       if (providersTbl == nullptr) {
         return;
@@ -143,7 +146,7 @@ namespace noctalia::config {
         if (provTbl == nullptr) {
           continue;
         }
-        std::string providerName = StringUtils::toLower(std::string(key.str()));
+        std::string providerName = StringUtils::toLower(key.str());
         if (providerName == "applications") {
           diag.warn(
               "shell.launcher.providers.applications", "custom settings are not allowed (Applications is always global)"
@@ -363,7 +366,7 @@ namespace noctalia::config {
       case WidgetSettingType::Color:
         if (auto v = node.value<std::string>()) {
           try {
-            (void)colorSpecFromConfigString(*v); // empty context: diag already carries the path
+            colorSpecFromConfigString(*v); // empty context: diag already carries the path
           } catch (const std::exception& e) {
             reportError(path, e.what());
           }
@@ -390,11 +393,11 @@ namespace noctalia::config {
         const auto field = std::ranges::find(fields, keyStr, &schema::WidgetSettingField::key);
         if (field == fields.end()) {
           if (flagUnknown) {
-            diag.warn(base + "." + keyStr, "unknown setting");
+            diag.warn(std::format("{}.{}", base, keyStr), "unknown setting");
           }
           continue;
         }
-        validateWidgetValue(node, *field, base + "." + keyStr, diag, componentOwner);
+        validateWidgetValue(node, *field, std::format("{}.{}", base, keyStr), diag, componentOwner);
       }
     }
 
@@ -549,7 +552,7 @@ namespace noctalia::config {
       check(section, prefix, kSection);
       if (const toml::node* order = section.get("widget_order"); order != nullptr) {
         if (const auto* arr = order->as_array()) {
-          (void)schema::readStringArray(*arr, schema::joinPath(prefix, "widget_order"), diag);
+          schema::readStringArray(*arr, schema::joinPath(prefix, "widget_order"), diag);
         } else {
           schema::warnWrongType(diag, schema::joinPath(prefix, "widget_order"), *order, "an array of strings");
         }
@@ -766,7 +769,7 @@ namespace noctalia::config {
       for (const auto& [name, node] : *bars) {
         if (name.str() == std::string_view("order")) {
           if (const auto* arr = node.as_array()) {
-            (void)schema::readStringArray(*arr, "bar.order", diag);
+            schema::readStringArray(*arr, "bar.order", diag);
           } else {
             schema::warnWrongType(diag, "bar.order", node, "an array of strings");
           }
@@ -828,20 +831,7 @@ namespace noctalia::config {
 
       // Resolve the candidate's plugin catalog without mutating the live registry.
       scripting::PluginRegistry pluginRegistry;
-      {
-        PluginsConfig pc;
-        schema::Diagnostics sink; // schema issues are already reported by checkSection above
-        if (const auto* pluginsTbl = merged["plugins"].as_table()) {
-          const bool sourcesConfigured = (*pluginsTbl)["source"].as_array() != nullptr;
-          schema::readInto(*pluginsTbl, pc, schema::pluginsSchema(), "plugins", sink);
-          if (!sourcesConfigured && pc.sources.empty()) {
-            pc.sources = defaultPluginSources();
-          }
-        } else {
-          pc.sources = defaultPluginSources();
-        }
-        scripting::applyPluginSourcesToRegistry(pluginRegistry, pc);
-      }
+      scripting::applyPluginSourcesToRegistry(pluginRegistry, schema::readPluginsSection(merged));
 
       validateLocation(merged, diag);
       validateBars(merged, diag);
@@ -862,11 +852,13 @@ namespace noctalia::config {
 
   } // namespace
 
-  schema::Diagnostics validateConfigSources(std::string_view configDir, std::string_view settingsTomlPath) {
+  schema::Diagnostics validateConfigSources(
+      std::string_view configDir, const std::span<const std::string> systemConfigDirs, std::string_view settingsTomlPath
+  ) {
     schema::Diagnostics diag;
     std::vector<std::filesystem::path> loadedFiles;
     ConfigOriginIndex origins;
-    const toml::table merged = mergeSources(configDir, settingsTomlPath, diag, loadedFiles, origins);
+    const toml::table merged = mergeSources(configDir, systemConfigDirs, settingsTomlPath, diag, loadedFiles, origins);
     // [include] is stripped from the merged table, so validate each loaded file's
     // raw [include] shape directly (covers root and subdirectory includes).
     for (const auto& file : loadedFiles) {
@@ -887,7 +879,7 @@ namespace noctalia::config {
     const std::filesystem::path file{std::string(path)};
     toml::table parsed;
     try {
-      parsed = toml::parse_file(std::string(path));
+      parsed = toml::parse_file(path);
     } catch (const toml::parse_error& e) {
       diag.fatalAt(parseErrorOrigin(e, file), "syntax", std::string(e.description()), "config.syntax");
       return diag;

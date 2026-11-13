@@ -51,7 +51,6 @@
       "move-toolbar": "Потягни щоб перемістити панель інструментів",
       "redo": "Вернути (Ctrl+Shift+Z)",
       "save": "Зберегти анотоване зображення (Ctrl+S)",
-      "size-advanced": "Точне налаштування розміру",
       "size-decrease": "Тонше ( [ )",
       "size-increase": "Товще ( ] )",
       "size-large": "Товстий",
@@ -1261,9 +1260,6 @@
           "groups": {
             "actions": "Дії",
             "behavior": "Поведінка",
-            "grouping": "Групування",
-            "presentation": "Презентація",
-            "runtime": "Час виконання",
             "taskbar": {
               "grouping": "Групування",
               "windows": "Вікна",
@@ -2560,8 +2556,7 @@
           "label": "Облікові записи календаря"
         },
         "calendar-edit": {
-          "button": "Редагувати",
-          "description": "Оновити цей обліковий запис календаря"
+          "button": "Редагувати"
         },
         "calendar-refresh-interval": {
           "description": "Інтервал синхронізації подій календаря (хв)",

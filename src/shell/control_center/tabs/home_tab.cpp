@@ -1,9 +1,8 @@
 #include "shell/control_center/tabs/home_tab.h"
 
+#include "app/build_info.h"
 #include "config/config_service.h"
-#include "core/build_info.h"
 #include "core/deferred_call.h"
-#include "core/files/directory_scanner.h"
 #include "core/input/keybind_matcher.h"
 #include "core/log.h"
 #include "cursor-shape-v1-client-protocol.h"
@@ -13,21 +12,22 @@
 #include "i18n/i18n.h"
 #include "notification/notifications.h"
 #include "render/animation/animation_manager.h"
-#include "render/core/async_texture_cache.h"
 #include "render/scene/input_area.h"
 #include "scripting/plugin_id.h"
 #include "shell/control_center/shortcut_registry.h"
+#include "shell/dialogs/file_dialog.h"
 #include "shell/panel/panel_button_style.h"
 #include "shell/panel/panel_manager.h"
 #include "shell/profile/avatar_path.h"
 #include "shell/wallpaper/wallpaper.h"
+#include "system/directory_scanner.h"
 #include "system/distro_info.h"
 #include "system/hardware_info.h"
 #include "system/weather_service.h"
 #include "time/time_format.h"
 #include "ui/builders.h"
 #include "ui/controls/grid_view.h"
-#include "ui/dialogs/file_dialog.h"
+#include "ui/controls/image.h"
 
 #include <algorithm>
 #include <cmath>
@@ -180,7 +180,7 @@ HomeTab::HomeTab(const ControlCenterServices& services)
       m_thumbnails(services.thumbnails), m_asyncTextures(services.asyncTextures),
       m_services(services.shortcutServices()) {
   if (m_thumbnails != nullptr) {
-    m_thumbnailPendingSub = m_thumbnails->subscribePendingUpload([this]() {
+    m_thumbnailPendingSub = m_thumbnails->subscribePendingUpload([this] {
       if (m_wallpaperBg == nullptr) {
         return;
       }
@@ -192,7 +192,7 @@ HomeTab::HomeTab(const ControlCenterServices& services)
   // even while the control center is closed, so it is already decoded by the
   // time the panel opens. Uses the last preview size the home card requested.
   if (m_wallpaper != nullptr) {
-    m_wallpaperChangedConn = m_wallpaper->changed().connect([this]() {
+    m_wallpaperChangedConn = m_wallpaper->changed().connect([this] {
       if (m_thumbnails != nullptr && m_loadedWallpaperSize > 0) {
         ensureWallpaperThumbnail(m_wallpaper->currentPath(), m_loadedWallpaperSize);
       }
@@ -255,10 +255,10 @@ std::unique_ptr<Flex> HomeTab::create() {
   }
 
   const float avatarSize = homeAvatarSize(scale);
-  const bool circularAvatar = m_config == nullptr || m_config->config().controlCenter.circularAvatar;
+  const bool circularAvatar = m_config == nullptr || m_config->config().shell.circularAvatar;
   m_avatarBorderShown = avatarBorderEnabled(m_config);
   const bool showAvatarBorder = m_avatarBorderShown;
-  const auto openAvatarPicker = [this]() {
+  const auto openAvatarPicker = [this] {
     if (m_config == nullptr) {
       return;
     }
@@ -276,7 +276,7 @@ std::unique_ptr<Flex> HomeTab::create() {
       }
       const auto applyResult = shell::applyAvatarPath(m_accounts, m_config, pickedPath->string());
       if (applyResult.success()) {
-        DeferredCall::callLater([]() {
+        DeferredCall::callLater([] {
           PanelManager::instance().refresh();
           PanelManager::instance().requestRedraw();
         });
@@ -312,14 +312,14 @@ std::unique_ptr<Flex> HomeTab::create() {
           .configure = [showAvatarBorder](Image& image) {
             applyAvatarChrome(&image, false, showAvatarBorder);
             image.setHitTestVisible(false);
-            image.setAsyncReadyCallback([]() { PanelManager::instance().refresh(); });
+            image.setAsyncReadyCallback([] { PanelManager::instance().refresh(); });
           },
       })
   );
   avatarArea->setOnEnter([this](const InputArea::PointerData&) { syncAvatarChrome(); });
-  avatarArea->setOnLeave([this]() { syncAvatarChrome(); });
-  avatarArea->setOnFocusGain([this]() { syncAvatarChrome(); });
-  avatarArea->setOnFocusLoss([this]() { syncAvatarChrome(); });
+  avatarArea->setOnLeave([this] { syncAvatarChrome(); });
+  avatarArea->setOnFocusGain([this] { syncAvatarChrome(); });
+  avatarArea->setOnFocusLoss([this] { syncAvatarChrome(); });
   const auto configureUserDetailLabel = [scale](Label& label) {
     label.setShadow(colorSpecFromRole(ColorRole::Shadow, 0.36F), 0.0F, 1.0F * scale);
   };
@@ -376,7 +376,7 @@ std::unique_ptr<Flex> HomeTab::create() {
   userCard->addChild(std::move(userRow));
 
   // Wallpaper panel: full-card keyboard target; carved pointer target leaves the avatar clickable.
-  const auto openWallpaperPanel = []() { PanelManager::instance().togglePanel("wallpaper"); };
+  const auto openWallpaperPanel = [] { PanelManager::instance().togglePanel("wallpaper"); };
   m_userCardKeyboardArea =
       addCardOverlay(*m_userCard, openWallpaperPanel, {.keyboardFocus = true, .pointerHitTest = false});
   m_userCardArea = addCardOverlay(*m_userCard, openWallpaperPanel, {.keyboardFocus = false, .pointerHitTest = true});
@@ -474,7 +474,7 @@ std::unique_ptr<Flex> HomeTab::create() {
   mediaCard->addChild(std::move(mediaContent));
 
   // Clicking anywhere on the media card opens the media tab.
-  m_mediaCardArea = addCardOverlay(*m_mediaCard, []() { openControlCenterTab("media"); });
+  m_mediaCardArea = addCardOverlay(*m_mediaCard, [] { openControlCenterTab("media"); });
 
   // --- Date/Time + Weather (below media) ---
   auto dateTimeCard = ui::row(
@@ -527,7 +527,7 @@ std::unique_ptr<Flex> HomeTab::create() {
   );
 
   // Opens Weather when weather is enabled, otherwise Calendar.
-  m_dateTimeCardArea = addCardOverlay(*m_dateTimeCard, [this]() {
+  m_dateTimeCardArea = addCardOverlay(*m_dateTimeCard, [this] {
     openControlCenterTab(m_weather != nullptr && m_weather->enabled() ? "weather" : "calendar");
   });
 
@@ -615,13 +615,13 @@ std::unique_ptr<Flex> HomeTab::create() {
         .gap = Style::spaceXs * scale,
         .radius = Style::scaledRadiusXl(scale),
         .onClick =
-            [this, padIdx]() {
+            [this, padIdx] {
               if (padIdx < m_shortcutPads.size()) {
                 m_shortcutPads[padIdx].shortcut->onClick();
               }
             },
         .onRightClick =
-            [this, padIdx]() {
+            [this, padIdx] {
               if (padIdx < m_shortcutPads.size()) {
                 m_shortcutPads[padIdx].shortcut->onRightClick();
               }
@@ -692,13 +692,13 @@ std::unique_ptr<Flex> HomeTab::createHeaderActions() {
       ui::button({
           .out = &m_settingsButton,
           .glyph = "settings",
-          .onClick = []() { PanelManager::instance().openSettingsWindow(); },
+          .onClick = [] { PanelManager::instance().openSettingsWindow(); },
           .configure = [scale](Button& button) { panel_button_style::configureHeaderIconButton(button, scale); },
       }),
       ui::button({
           .out = &m_sessionButton,
           .glyph = "shutdown",
-          .onClick = []() { PanelManager::instance().togglePanel("session"); },
+          .onClick = [] { PanelManager::instance().togglePanel("session"); },
           .configure = [scale](Button& button) { panel_button_style::configureHeaderIconButton(button, scale); },
       })
   );
@@ -859,7 +859,7 @@ void HomeTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight)
       m_userAvatar->setSize(desiredAvatar, desiredAvatar);
       m_userAvatar->setPadding(1.0F * scale);
     }
-    const bool circularAvatar = m_config == nullptr || m_config->config().controlCenter.circularAvatar;
+    const bool circularAvatar = m_config == nullptr || m_config->config().shell.circularAvatar;
     m_userAvatar->setRadius(circularAvatar ? desiredAvatar * 0.5F : Style::scaledRadiusLg(scale));
     if (m_userAvatarArea != nullptr) {
       m_userAvatarArea->setHitShape(circularAvatar ? InputArea::HitShape::Circle : InputArea::HitShape::Rect);
@@ -905,6 +905,9 @@ void HomeTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight)
     if (m_bottomRow != nullptr) {
       m_bottomRow->setMinHeight(gridH);
     }
+    // GridView measures against its current height, so a height left over from an earlier pass
+    // would stretch the bottom row past gridH while the media/clock cards stay capped below.
+    m_shortcutsGrid->setSize(gridW, gridH);
 
     // Integer card heights track the snapped row height so top/bottom borders land on pixels.
     if (m_mediaCard != nullptr && m_dateTimeCard != nullptr) {
@@ -970,7 +973,7 @@ InputArea* HomeTab::addCardOverlay(Flex& card, std::function<void()> onActivate,
 
   if (options.pointerHitTest) {
     area->setOnEnter([setHovered](const InputArea::PointerData&) { setHovered(true); });
-    area->setOnLeave([setHovered, areaPtr]() {
+    area->setOnLeave([setHovered, areaPtr] {
       if (areaPtr->focused()) {
         return;
       }
@@ -979,8 +982,8 @@ InputArea* HomeTab::addCardOverlay(Flex& card, std::function<void()> onActivate,
     area->setOnClick([activate](const InputArea::PointerData&) { activate(); });
   }
   if (options.keyboardFocus) {
-    area->setOnFocusGain([setHovered]() { setHovered(true); });
-    area->setOnFocusLoss([setHovered, areaPtr]() {
+    area->setOnFocusGain([setHovered] { setHovered(true); });
+    area->setOnFocusLoss([setHovered, areaPtr] {
       if (areaPtr->hovered()) {
         return;
       }
@@ -1115,7 +1118,7 @@ void HomeTab::ensureWallpaperThumbnail(const std::string& path, int targetPx) {
     m_thumbnails->release(m_loadedWallpaperPath, m_loadedWallpaperSize);
   }
   if (!path.empty() && targetPx > 0) {
-    (void)m_thumbnails->acquire(path, targetPx);
+    m_thumbnails->acquire(path, targetPx);
   }
   m_loadedWallpaperPath = path;
   m_loadedWallpaperSize = targetPx;
@@ -1173,7 +1176,7 @@ void HomeTab::syncWallpaperBackground(Renderer& renderer) {
     return;
   }
 
-  (void)m_thumbnails->uploadPending(renderer.textureManager());
+  m_thumbnails->uploadPending(renderer.textureManager());
   const TextureHandle crisp = m_thumbnails->peek(path, targetPx);
   if (!crisp.valid()) {
     // Still decoding: keep the placeholder; fade the crisp layer in once it lands.
@@ -1212,7 +1215,7 @@ void HomeTab::startCrispFade() {
   m_wallpaperCrispAnimId = animations->animate(
       0.0F, 1.0F, static_cast<float>(Style::animNormal), Easing::EaseOutCubic,
       [crisp](float v) { crisp->setOpacity(v); },
-      [this]() {
+      [this] {
         m_wallpaperCrispAnimId = 0;
         m_crispOpaque = true;
         syncWallpaperLayerVisibility();
@@ -1258,7 +1261,7 @@ void HomeTab::doUpdate(Renderer& renderer) {
       m_mpris != nullptr && m_mpris->activePlayer().has_value() && m_mpris->activePlayer()->playbackStatus == "Playing";
   if (playing) {
     if (!m_progressTimer.active()) {
-      m_progressTimer.startRepeating(std::chrono::milliseconds(1000), [this]() {
+      m_progressTimer.startRepeating(std::chrono::milliseconds(1000), [this] {
         if (!m_active) {
           return;
         }
@@ -1273,8 +1276,6 @@ void HomeTab::doUpdate(Renderer& renderer) {
   }
   sync(renderer);
 }
-
-void HomeTab::onFrameTick(float /*deltaMs*/) {}
 
 void HomeTab::setActive(bool active) {
   const bool becameActive = active && !m_active;
@@ -1296,7 +1297,7 @@ void HomeTab::setActive(bool active) {
   if (becameActive) {
     // Other tabs were laid out while this body was hidden; flex sizes for the media row can be stale.
     // Defer so the tab container receives its configure size before HomeTab::doLayout runs.
-    DeferredCall::callLater([]() {
+    DeferredCall::callLater([] {
       PanelManager::instance().requestLayout();
       PanelManager::instance().requestUpdateOnly();
     });
@@ -1305,7 +1306,7 @@ void HomeTab::setActive(bool active) {
     // open and idle. Without this, the clock only refreshes when an unrelated service happens
     // to force a redraw (see issue #4046). setText() is a no-op when the text is unchanged, so
     // formats without seconds cost nothing beyond the cheap format + comparison each second.
-    m_clockTimer.startRepeating(std::chrono::milliseconds(1000), [this]() {
+    m_clockTimer.startRepeating(std::chrono::milliseconds(1000), [this] {
       if (!m_active) {
         return;
       }
@@ -1429,11 +1430,9 @@ void HomeTab::syncScaledFonts() {
     if (pad.label != nullptr) {
       pad.label->setFontSize(Style::fontSizeMini * s);
     }
-    if (pad.glyph != nullptr) {
-      // Icon-only glyphs are sized from cell side in doLayout.
-      if (m_config == nullptr || m_config->config().controlCenter.showShortcutLabels) {
-        pad.glyph->setGlyphSize(Style::fontSizeTitle * 1.35F * s);
-      }
+    // Icon-only glyphs are sized from cell side in doLayout.
+    if (pad.glyph != nullptr && (m_config == nullptr || m_config->config().controlCenter.showShortcutLabels)) {
+      pad.glyph->setGlyphSize(Style::fontSizeTitle * 1.35F * s);
     }
   }
 }
@@ -1462,7 +1461,7 @@ void HomeTab::sync(Renderer& renderer) {
       // image displayed near 1:1. Both made the avatar look blurry. The decode runs on
       // the async cache workers so a large source never stalls the panel open.
       const int avatarSize = static_cast<int>(std::round(m_userAvatar->width()));
-      (void)m_userAvatar->setSourceFileAsync(renderer, *m_asyncTextures, displayPath, avatarSize, false);
+      m_userAvatar->setSourceFileAsync(renderer, *m_asyncTextures, displayPath, avatarSize, false);
     }
   }
 
@@ -1480,7 +1479,7 @@ void HomeTab::sync(Renderer& renderer) {
   }
   if (m_userCompositor != nullptr) {
     const std::weak_ptr<void> aliveGuard = m_aliveGuard;
-    const auto versionLine = compositorVersionLine([this, aliveGuard]() {
+    const auto versionLine = compositorVersionLine([this, aliveGuard] {
       if (aliveGuard.expired() || m_userCompositor == nullptr) {
         return;
       }

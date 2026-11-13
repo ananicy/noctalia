@@ -11,7 +11,7 @@ namespace {
 
   constexpr Logger kLog("umbriel_workspace_backend");
 
-  [[nodiscard]] std::string jsonString(const nlohmann::json& json, std::string_view key) {
+  std::string jsonString(const nlohmann::json& json, std::string_view key) {
     const auto it = json.find(key);
     if (it == json.end() || !it->is_string()) {
       return {};
@@ -19,7 +19,7 @@ namespace {
     return it->get<std::string>();
   }
 
-  [[nodiscard]] std::optional<WindowMinimizeState> parseMinimizeState(const nlohmann::json& entry) {
+  std::optional<WindowMinimizeState> parseMinimizeState(const nlohmann::json& entry) {
     const auto minimized = entry.find("minimized");
     const auto minimizable = entry.find("minimizable");
     if (minimized == entry.end()
@@ -90,8 +90,7 @@ std::string UmbrielWorkspaceBackend::workspaceKeyForId(const std::string& worksp
 
 void UmbrielWorkspaceBackend::apply(std::vector<Workspace>& workspaces, const std::string& outputName) const {
   for (auto& workspace : workspaces) {
-    workspace.occupied =
-        std::ranges::any_of(m_windows, [&](const auto& window) { return window.second.workspaceId == workspace.id; });
+    workspace.occupied = m_occupiedWorkspaceIds.contains(workspace.id);
   }
 
   WorkspaceList refreshed;
@@ -180,13 +179,13 @@ std::vector<WorkspaceWindow> UmbrielWorkspaceBackend::workspaceWindows(const std
 }
 
 bool UmbrielWorkspaceBackend::focusWindowById(const std::string& windowId, bool warpPointer) {
-  return m_runtime.requestAction(std::string(warpPointer ? "window-focus-warp:" : "window-focus:") + windowId);
+  return m_runtime.requestAction(warpPointer ? "window-focus-warp" : "window-focus", {{"window", windowId}});
 }
 
 std::optional<std::string> UmbrielWorkspaceBackend::focusedWindowId() const { return m_focusedWindowId; }
 
 bool UmbrielWorkspaceBackend::closeWindowById(const std::string& windowId) {
-  return m_runtime.requestAction("window-close:" + windowId);
+  return m_runtime.requestAction("window-close", {{"window", windowId}});
 }
 
 std::optional<WindowMinimizeState> UmbrielWorkspaceBackend::windowMinimizeState(std::string_view windowId) const {
@@ -202,7 +201,7 @@ bool UmbrielWorkspaceBackend::minimizeWindowById(const std::string& windowId) {
   if (!state.has_value() || !state->minimizable || state->minimized) {
     return false;
   }
-  return m_runtime.requestAction("window-minimize:" + windowId);
+  return m_runtime.requestAction("window-minimize", {{"window", windowId}});
 }
 
 void UmbrielWorkspaceBackend::cleanup() { m_runtime.cleanup(); }
@@ -211,6 +210,7 @@ void UmbrielWorkspaceBackend::handleStreamReset() {
   const bool overviewWasOpen = m_overviewKnown && m_overviewOpen;
   m_windows.clear();
   m_workspacesByOutput.clear();
+  m_occupiedWorkspaceIds.clear();
   m_focusedWindowId.reset();
   m_overviewKnown = false;
   m_overviewOpen = false;
@@ -222,6 +222,30 @@ void UmbrielWorkspaceBackend::handleStreamReset() {
 }
 
 void UmbrielWorkspaceBackend::handleEvent(std::string_view event, const nlohmann::json& data) {
+  if (event == "workspaces") {
+    if (!data.is_array()) {
+      kLog.warn("workspaces snapshot must be an array");
+      return;
+    }
+    std::unordered_set<std::string> occupied;
+    for (const auto& entry : data) {
+      const std::string id = jsonString(entry, "id");
+      const auto occupiedIt = entry.find("occupied");
+      if (id.empty() || occupiedIt == entry.end() || !occupiedIt->is_boolean()) {
+        kLog.warn("workspaces snapshot requires an ID and boolean occupied field");
+        return;
+      }
+      if (occupiedIt->get<bool>()) {
+        occupied.insert(id);
+      }
+    }
+    if (occupied != m_occupiedWorkspaceIds) {
+      m_occupiedWorkspaceIds = std::move(occupied);
+      notifyChanged();
+    }
+    return;
+  }
+
   if (event == "windows") {
     if (!data.is_array()) {
       kLog.warn("windows snapshot must be an array");
@@ -232,7 +256,6 @@ void UmbrielWorkspaceBackend::handleEvent(std::string_view event, const nlohmann
         window.minimizeState.reset();
       }
       if (changed) {
-        notifyChanged();
         notifyWindowsChanged();
       }
       return;
@@ -263,12 +286,21 @@ void UmbrielWorkspaceBackend::handleEvent(std::string_view event, const nlohmann
       next.emplace_back(id, std::move(window));
     }
 
-    m_focusedWindowId = std::move(focused);
     if (next == m_windows) {
       return;
     }
+    const bool workspaceChanged =
+        focused != m_focusedWindowId || !std::ranges::equal(next, m_windows, [](const auto& a, const auto& b) {
+          return a.first == b.first
+              && a.second.workspaceId == b.second.workspaceId
+              && a.second.appId == b.second.appId
+              && a.second.title == b.second.title;
+        });
+    m_focusedWindowId = std::move(focused);
     m_windows = std::move(next);
-    notifyChanged();
+    if (workspaceChanged) {
+      notifyChanged();
+    }
     notifyWindowsChanged();
     return;
   }

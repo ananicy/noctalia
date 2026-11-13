@@ -3,8 +3,8 @@
 #include "core/log.h"
 #include "lua.h"
 #include "lualib.h"
+#include "scripting/ui/ui_tree.h"
 #include "scripting/ui_handler_table.h"
-#include "ui/ui_tree.h"
 
 #include <algorithm>
 #include <cmath>
@@ -607,6 +607,7 @@ namespace {
       {"render", luau_ui_render},
       {"setWantsSecondTicks", luau_ui_setWantsSecondTicks},
       {"setNeedsFrameTick", luau_ui_setNeedsFrameTick},
+      {"setVisible", luau_setVisible},
       {nullptr, nullptr},
   };
 
@@ -640,12 +641,17 @@ namespace {
   ) {
     lua_getfield(L, tableIndex, field);
     if (lua_type(L, -1) != LUA_TSTRING) {
-      luaL_error(L, "panel.openContextMenu: %s must be a string", description.data());
+      luaL_error(
+          L, "panel.openContextMenu: %.*s must be a string", static_cast<int>(description.size()), description.data()
+      );
     }
     std::size_t len = 0;
     const char* value = lua_tolstring(L, -1, &len);
     if (len == 0 || len > maxBytes) {
-      luaL_error(L, "panel.openContextMenu: %s must contain 1..%zu bytes", description.data(), maxBytes);
+      luaL_error(
+          L, "panel.openContextMenu: %.*s must contain 1..%zu bytes", static_cast<int>(description.size()),
+          description.data(), maxBytes
+      );
     }
     std::string out(value, len);
     lua_pop(L, 1);
@@ -838,15 +844,15 @@ namespace scripting {
     std::visit(
         [L](const auto& val) {
           using T = std::decay_t<decltype(val)>;
-          if constexpr (std::is_same_v<T, bool>)
+          if constexpr (std::is_same_v<T, bool>) {
             lua_pushboolean(L, val ? 1 : 0);
-          else if constexpr (std::is_same_v<T, std::int64_t>)
+          } else if constexpr (std::is_same_v<T, std::int64_t>) {
             lua_pushnumber(L, static_cast<double>(val));
-          else if constexpr (std::is_same_v<T, double>)
+          } else if constexpr (std::is_same_v<T, double>) {
             lua_pushnumber(L, val);
-          else if constexpr (std::is_same_v<T, std::string>)
+          } else if constexpr (std::is_same_v<T, std::string>) {
             lua_pushlstring(L, val.data(), val.size());
-          else if constexpr (std::is_same_v<T, std::vector<std::string>>) {
+          } else if constexpr (std::is_same_v<T, std::vector<std::string>>) {
             lua_createtable(L, static_cast<int>(val.size()), 0);
             for (size_t i = 0; i < val.size(); ++i) {
               lua_pushlstring(L, val[i].data(), val[i].size());

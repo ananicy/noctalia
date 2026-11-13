@@ -11,6 +11,8 @@
 #include "render/render_target.h"
 #include "render/scene/node.h"
 #include "shell/dock/pinned_apps.h"
+#include "shell/wayland/layer_shell.h"
+#include "shell/wayland/wayland_toplevels.h"
 #include "system/desktop_entry.h"
 #include "ui/builders.h"
 #include "ui/controls/context_menu.h"
@@ -18,7 +20,6 @@
 #include "ui/style.h"
 #include "wayland/popup_surface.h"
 #include "wayland/wayland_connection.h"
-#include "wayland/wayland_toplevels.h"
 #include "xdg-shell-client-protocol.h"
 
 #include <algorithm>
@@ -392,26 +393,27 @@ namespace shell::dock {
       menuPtr->sceneRoot = ui::node({});
       menuPtr->sceneRoot->setSize(fw, fh);
       if (Style::popupShadowsEnabled()) {
-        (void)popup_chrome::addShadow(
+        popup_chrome::addShadow(
             *menuPtr->sceneRoot, menuPtr->chrome, config.config().shell.shadow, Style::scaledRadiusLg()
         );
       }
-      (void)popup_chrome::addCardBackground(*menuPtr->sceneRoot, menuPtr->chrome, 1.0F);
+      popup_chrome::addCardBackground(*menuPtr->sceneRoot, menuPtr->chrome, 1.0F);
 
       auto ctrl = std::make_unique<ContextMenuControl>();
       ctrl->setMenuWidth(menuPtr->chrome.contentWidth);
       ctrl->setMaxVisible(entries.size());
       ctrl->setEntries(entries);
-      ctrl->setRedrawCallback([menuPtr]() {
-        if (menuPtr->surface)
+      ctrl->setRedrawCallback([menuPtr] {
+        if (menuPtr->surface) {
           menuPtr->surface->requestRedraw();
+        }
       });
       ctrl->setOnActivate([menuPtr, entryActions, callbacks, isPinned,
                            closableWindowIndices](const ContextMenuControlEntry& e) {
         const std::int32_t id = e.id;
         auto menuWindows = menuPtr->windows;
         DeferredCall::callLater([id, entryActions, callbacks, isPinned, menuWindows = std::move(menuWindows),
-                                 closableWindowIndices]() mutable {
+                                 closableWindowIndices] mutable {
           if (id == kMenuPinToggleId) {
             if (callbacks.setEntryPinned) {
               callbacks.setEntryPinned(!isPinned);
@@ -463,15 +465,16 @@ namespace shell::dock {
       menuPtr->surface->setSceneRoot(menuPtr->sceneRoot.get());
     });
 
-    menu->surface->setDismissedCallback([callbacks]() {
-      DeferredCall::callLater([callbacks]() {
+    menu->surface->setDismissedCallback([callbacks] {
+      DeferredCall::callLater([callbacks] {
         if (callbacks.closeMenu) {
           callbacks.closeMenu();
         }
       });
     });
 
-    if (parentLayerSurface == nullptr || !menu->surface->initialize(parentLayerSurface, output, popupCfg)) {
+    if (parentLayerSurface == nullptr
+        || !menu->surface->initialize(LayerShell::popupAttach(parentLayerSurface), output, popupCfg)) {
       kLog.warn("dock: failed to create item-menu popup");
       return nullptr;
     }

@@ -4,20 +4,21 @@
 #include "config/config_types.h"
 #include "core/log.h"
 #include "shell/dock/pinned_apps.h"
+#include "shell/wayland/wayland_toplevels.h"
 #include "system/app_identity.h"
 #include "util/string_utils.h"
-#include "wayland/wayland_toplevels.h"
 
+#include <algorithm>
+#include <span>
 #include <unordered_map>
 
 namespace {
 
   constexpr Logger kLog("dock");
 
-  [[nodiscard]] std::string
-  taskbarStyleWmClassLower(std::string_view startupWmClass, std::string_view fallbackIdLower) {
+  std::string taskbarStyleWmClassLower(std::string_view startupWmClass, std::string_view fallbackIdLower) {
     if (!startupWmClass.empty()) {
-      return StringUtils::toLower(std::string(startupWmClass));
+      return StringUtils::toLower(startupWmClass);
     }
     return std::string(fallbackIdLower);
   }
@@ -62,12 +63,9 @@ namespace shell::dock {
     bool
     alreadyListsResolvedEntry(const std::vector<DesktopEntry>& entries, const app_identity::ResolvedRunningApp& run) {
       const std::string resolvedIdLower = StringUtils::toLower(run.entry.id);
-      for (const auto& entry : entries) {
-        if (StringUtils::toLower(entry.id) == resolvedIdLower) {
-          return true;
-        }
-      }
-      return false;
+      return std::ranges::any_of(entries, [&](const auto& entry) {
+        return StringUtils::toLower(entry.id) == resolvedIdLower;
+      });
     }
 
   } // namespace
@@ -146,6 +144,20 @@ namespace shell::dock {
     }
 
     return snapshot;
+  }
+
+  void keepRunningItemOrder(const DockSnapshot& previous, DockSnapshot& next, std::size_t pinnedCount) {
+    std::unordered_map<std::string_view, std::size_t> previousPositions;
+    previousPositions.reserve(previous.items.size());
+    for (std::size_t i = 0; i < previous.items.size(); ++i) {
+      previousPositions.emplace(previous.items[i].idLower, i);
+    }
+    const auto position = [&](const DockItemModel& item) {
+      const auto it = previousPositions.find(item.idLower);
+      return it != previousPositions.end() ? it->second : previous.items.size();
+    };
+    auto runningItems = std::span(next.items).subspan(pinnedCount);
+    std::ranges::stable_sort(runningItems, [&](const auto& a, const auto& b) { return position(a) < position(b); });
   }
 
   bool sameDockItemSet(const DockSnapshot& a, const DockSnapshot& b) {

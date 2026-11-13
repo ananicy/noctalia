@@ -1067,9 +1067,6 @@
         "settings": {
           "empty": "Nincsenek a jelenlegi szűrőknek megfelelő beállítások.",
           "groups": {
-            "grouping": "Csoportosítás",
-            "presentation": "Megjelenítés",
-            "runtime": "Futási idő",
             "taskbar": {
               "grouping": "Csoportosítás",
               "windows": "Ablakok",
@@ -2445,8 +2442,7 @@
         "calendar-edit": {
           "button": "Szerkesztés",
           "button-reconnect": "Újracsatlakozás",
-          "button-retry": "Újra",
-          "description": "Frissítsd ezt a naptárfiókot"
+          "button-retry": "Újra"
         },
         "calendar-event-date-format": {
           "description": "A kiválasztott dátum eseménykártyáján megjelenő dátumformátum",
